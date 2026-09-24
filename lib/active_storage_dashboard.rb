@@ -8,6 +8,7 @@ require "active_storage_dashboard/orphan_purger"
 require "active_storage_dashboard/analyzer"
 require "active_storage_dashboard/variant_regenerator"
 require "active_storage_dashboard/safety_check"
+require "active_storage_dashboard/growth_forecast"
 
 module ActiveStorageDashboard
   mattr_accessor :base_controller_class, default: "ActionController::Base"

@@ -18,6 +18,13 @@ module ActiveStorageDashboard
       # Find largest blob
       @largest_blob = ActiveStorage::Blob.order(byte_size: :desc).first
       
+      begin
+        @growth = GrowthForecast.from_database
+      rescue => e
+        Rails.logger.error "Error in storage growth forecast: #{e.message}"
+        @growth = nil
+      end
+
       # Initialize empty hash for the timeline chart
       @blobs_by_month = {}
       

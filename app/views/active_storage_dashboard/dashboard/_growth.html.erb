@@ -1,0 +1,477 @@
+<%# Storage growth: cumulative storage with linear & exponential projections. Expects `growth` (GrowthForecast or nil). %>
+<div class="card growth-card">
+  <div class="card-header">
+    <div class="card-header-title">Storage Growth</div>
+  </div>
+  <div class="card-body">
+    <% if growth.nil? || !growth.enough_data? %>
+      <p class="no-data-message">At least <%= ActiveStorageDashboard::GrowthForecast::MIN_MONTHS %> complete months of uploads are needed to analyse growth.</p>
+    <% else %>
+      <%
+        pattern_copy = {
+          exponential: ["Accelerating, close to exponential",
+                        "Monthly uploads keep increasing and the total grows by a roughly constant percentage each month."],
+          accelerating: ["Accelerating, faster than linear",
+                         "Monthly uploads are increasing, but a constant percentage growth does not fit better than a straight line yet."],
+          linear: ["Roughly linear",
+                   "About the same amount is added every month; monthly uploads are not trending up or down."],
+          slowing: ["Slowing down",
+                    "Monthly uploads are decreasing, so the total grows more slowly than a straight line."]
+        }
+        title, explanation = pattern_copy.fetch(growth.pattern)
+        rate = growth.monthly_growth_rate
+        doubling = growth.doubling_months
+      %>
+      <div class="growth-verdict">
+        <span class="growth-verdict-label">Growth pattern</span>
+        <span class="growth-verdict-value"><%= title %></span>
+        <p class="growth-verdict-text"><%= explanation %></p>
+      </div>
+
+      <div class="growth-stats">
+        <div class="growth-stat">
+          <div class="growth-stat-label">Added per month</div>
+          <div class="growth-stat-value"><%= format_bytes(growth.average_monthly_addition) %></div>
+          <div class="growth-stat-note">average of the last 6 months</div>
+        </div>
+        <div class="growth-stat">
+          <div class="growth-stat-label">Monthly growth</div>
+          <div class="growth-stat-value"><%= rate ? "#{(rate * 100).round(1)}% / month" : "–" %></div>
+          <div class="growth-stat-note">added per month vs. current total</div>
+        </div>
+        <div class="growth-stat">
+          <div class="growth-stat-label">Doubling time</div>
+          <div class="growth-stat-value"><%= doubling ? "#{doubling.round(1)} months" : "–" %></div>
+          <div class="growth-stat-note">at the <%= growth.best_model %> trend</div>
+        </div>
+        <div class="growth-stat">
+          <div class="growth-stat-label">In 12 months</div>
+          <div class="growth-stat-value"><%= format_bytes(growth.projected_total) %></div>
+          <div class="growth-stat-note"><%= growth.best_model %> projection (best fit)</div>
+        </div>
+      </div>
+
+      <div class="growth-toolbar">
+        <ul class="growth-legend">
+          <li><span class="growth-key growth-key-actual"></span>Actual total</li>
+          <li><span class="growth-key growth-key-linear"></span>Linear trend<%= " (best fit)" if growth.best_model == :linear %> · R² <%= growth.linear[:r2].round(3) %></li>
+          <% if growth.exponential %>
+            <li><span class="growth-key growth-key-exponential"></span>Exponential trend<%= " (best fit)" if growth.best_model == :exponential %> · R² <%= growth.exponential[:r2].round(3) %></li>
+          <% end %>
+        </ul>
+        <div class="growth-scale" role="group" aria-label="Y-axis scale">
+          <button type="button" class="growth-scale-btn is-active" data-scale="linear" aria-pressed="true">Linear</button>
+          <button type="button" class="growth-scale-btn" data-scale="log" aria-pressed="false">Log</button>
+        </div>
+      </div>
+      <p class="growth-hint">On the log scale, exponential growth is a straight line and linear growth bends flatter over time.</p>
+
+      <div class="growth-chart" data-growth-chart="total" role="img" aria-label="Cumulative storage over time with linear and exponential projections"></div>
+
+      <h3 class="growth-subtitle">Uploaded per month</h3>
+      <div class="growth-chart" data-growth-chart="added" role="img" aria-label="Bytes uploaded per month"></div>
+
+      <details class="growth-table">
+        <summary>Show data table</summary>
+        <table class="table">
+          <thead><tr><th>Month</th><th>Uploaded</th><th>Total</th></tr></thead>
+          <tbody>
+            <% growth.months.reverse_each do |m| %>
+              <tr>
+                <td><%= m[:month].strftime("%b %Y") %><%= " (to date)" if m[:partial] %></td>
+                <td><%= format_bytes(m[:added]) %></td>
+                <td><%= format_bytes(m[:total]) %></td>
+              </tr>
+            <% end %>
+          </tbody>
+        </table>
+      </details>
+
+      <p class="growth-footnote">
+        Both trends are fitted to the last <%= growth.fit_months.size %> complete months (since <%= growth.fit_months.first[:month].strftime("%b %Y") %>); the current month is excluded because it is not finished.
+        History is rebuilt from the blobs that exist today, grouped by upload month, so files that were already deleted are not counted.
+      </p>
+
+      <script type="application/json" id="growth-data"><%= json_escape(growth.as_json.to_json).html_safe %></script>
+    <% end %>
+  </div>
+  <div class="growth-tooltip" hidden></div>
+</div>
+
+<style>
+  .growth-card {
+    --viz-surface: #ffffff;
+    --viz-ink: #0b0b0b;
+    --viz-ink-2: #52514e;
+    --viz-muted: #898781;
+    --viz-grid: #e1e0d9;
+    --viz-axis: #c3c2b7;
+    --viz-actual: #2a78d6;
+    --viz-linear: #eb6834;
+    --viz-exponential: #1baf7a;
+    position: relative;
+    margin-bottom: 2rem;
+  }
+  .growth-verdict { margin-bottom: 1.25rem; }
+  .growth-verdict-label {
+    display: block;
+    font-size: 0.75rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--viz-muted);
+  }
+  .growth-verdict-value { font-size: 1.5rem; font-weight: 600; color: var(--viz-ink); }
+  .growth-verdict-text { color: var(--viz-ink-2); margin-top: 0.25rem; }
+  .growth-stats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+  }
+  .growth-stat { padding: 0.75rem 1rem; background: var(--light-color); border-radius: 0.5rem; }
+  .growth-stat-label { font-size: 0.8rem; color: var(--viz-ink-2); }
+  .growth-stat-value { font-size: 1.25rem; font-weight: 600; color: var(--viz-ink); }
+  .growth-stat-note { font-size: 0.75rem; color: var(--viz-muted); }
+  .growth-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .growth-legend {
+    list-style: none;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+    font-size: 0.85rem;
+    color: var(--viz-ink-2);
+  }
+  .growth-legend li { display: inline-flex; align-items: center; gap: 0.4rem; }
+  .growth-key { display: inline-block; width: 18px; height: 0; border-top: 2px solid; }
+  .growth-key-actual { border-color: var(--viz-actual); }
+  .growth-key-linear { border-color: var(--viz-linear); border-top-style: dashed; }
+  .growth-key-exponential { border-color: var(--viz-exponential); border-top-style: dashed; }
+  .growth-scale { display: inline-flex; border: 1px solid var(--border-color); border-radius: 0.375rem; overflow: hidden; }
+  .growth-scale-btn {
+    border: 0;
+    background: transparent;
+    padding: 0.25rem 0.75rem;
+    font-size: 0.8rem;
+    color: var(--viz-ink-2);
+    cursor: pointer;
+  }
+  .growth-scale-btn.is-active { background: var(--viz-actual); color: #fff; }
+  .growth-hint { font-size: 0.8rem; color: var(--viz-muted); margin: 0.5rem 0 0.75rem; }
+  .growth-subtitle { font-size: 0.95rem; font-weight: 600; color: var(--viz-ink); margin: 1.5rem 0 0.5rem; }
+  .growth-chart { width: 100%; }
+  .growth-chart svg { display: block; width: 100%; overflow: visible; }
+  .growth-chart text { font-size: 11px; fill: var(--viz-muted); font-variant-numeric: tabular-nums; }
+  .growth-table { margin-top: 1.25rem; font-size: 0.85rem; }
+  .growth-table summary { cursor: pointer; color: var(--primary-color); }
+  .growth-table table { margin-top: 0.5rem; max-height: 320px; }
+  .growth-footnote { margin-top: 1rem; font-size: 0.75rem; color: var(--viz-muted); }
+  .growth-tooltip {
+    position: absolute;
+    pointer-events: none;
+    background: var(--viz-surface);
+    border: 1px solid rgba(11, 11, 11, 0.1);
+    border-radius: 0.375rem;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    padding: 0.5rem 0.75rem;
+    font-size: 0.8rem;
+    color: var(--viz-ink-2);
+    white-space: nowrap;
+    z-index: 10;
+  }
+  .growth-tooltip-title { font-weight: 600; color: var(--viz-ink); margin-bottom: 0.25rem; }
+  .growth-tooltip-row { display: flex; align-items: center; gap: 0.5rem; }
+  .growth-tooltip-row strong { color: var(--viz-ink); margin-left: auto; padding-left: 1rem; }
+</style>
+
+<script>
+  (function() {
+    var dataEl = document.getElementById('growth-data');
+    if (!dataEl) return;
+    var data = JSON.parse(dataEl.textContent);
+    var card = dataEl.closest('.growth-card');
+    var tooltip = card.querySelector('.growth-tooltip');
+    var SVG = 'http://www.w3.org/2000/svg';
+    var MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+    var UNITS = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    var scale = 'linear';
+
+    function formatBytes(bytes, digits) {
+      if (!bytes) return '0 B';
+      var exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), UNITS.length - 1);
+      var value = bytes / Math.pow(1024, exp);
+      return (digits === undefined ? value.toFixed(2) : +value.toFixed(digits)) + ' ' + UNITS[exp];
+    }
+
+    function monthLabel(key, withYear) {
+      var parts = key.split('-');
+      return MONTHS[+parts[1] - 1] + (withYear ? ' ' + parts[0] : '');
+    }
+
+    function monthIndex(key) {
+      var parts = key.split('-');
+      return +parts[0] * 12 + (+parts[1] - 1);
+    }
+
+    function el(name, attrs, parent) {
+      var node = document.createElementNS(SVG, name);
+      for (var k in attrs) node.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(node);
+      return node;
+    }
+
+    // Clean ticks in the byte unit that fits the maximum, e.g. 0 / 500 MB / 1 GB / 1.5 GB.
+    function tickUnit(max) {
+      return Math.max(0, Math.min(UNITS.length - 1, Math.floor(Math.log(max) / Math.log(1024))));
+    }
+
+    function linearTicks(max) {
+      var unit = Math.pow(1024, tickUnit(max));
+      var raw = max / unit / 4;
+      var mag = Math.pow(10, Math.floor(Math.log10(raw)));
+      var step = [1, 2, 2.5, 5, 10].map(function(s) { return s * mag; }).find(function(s) { return s >= raw; }) * unit;
+      var ticks = [];
+      for (var v = 0; v <= max * 1.0001 + step; v += step) { ticks.push(v); if (v >= max) break; }
+      return ticks;
+    }
+
+    function logTicks(min, max) {
+      var ticks = [];
+      for (var e = 0; e < UNITS.length; e++) {
+        [1, 10, 100].forEach(function(m) {
+          var v = m * Math.pow(1024, e);
+          if (v >= min && v <= max) ticks.push(v);
+        });
+      }
+      return ticks;
+    }
+
+    function tooltipRows(title, rows) {
+      tooltip.replaceChildren();
+      var head = document.createElement('div');
+      head.className = 'growth-tooltip-title';
+      head.textContent = title;
+      tooltip.appendChild(head);
+      rows.forEach(function(row) {
+        var line = document.createElement('div');
+        line.className = 'growth-tooltip-row';
+        var key = document.createElement('span');
+        key.className = 'growth-key';
+        key.style.borderColor = row.color;
+        if (row.dashed) key.style.borderTopStyle = 'dashed';
+        var label = document.createElement('span');
+        label.textContent = row.label;
+        var value = document.createElement('strong');
+        value.textContent = row.value;
+        line.append(key, label, value);
+        tooltip.appendChild(line);
+      });
+    }
+
+    function showTooltip(event) {
+      tooltip.hidden = false;
+      var box = card.getBoundingClientRect();
+      var x = event.clientX - box.left + 16;
+      var y = event.clientY - box.top + 16;
+      if (x + tooltip.offsetWidth > box.width - 8) x = event.clientX - box.left - tooltip.offsetWidth - 16;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top = y + 'px';
+    }
+
+    function hideTooltip() { tooltip.hidden = true; }
+
+    function frame(container, height) {
+      container.replaceChildren();
+      var width = container.clientWidth;
+      var svg = el('svg', {width: width, height: height, viewBox: '0 0 ' + width + ' ' + height});
+      container.appendChild(svg);
+      return {svg: svg, width: width, height: height, m: {top: 12, right: 16, bottom: 28, left: 72}};
+    }
+
+    function xAxis(f, keys, x) {
+      var every = Math.max(1, Math.ceil(keys.length / Math.max(2, Math.floor((f.width - f.m.left - f.m.right) / 64))));
+      keys.forEach(function(key, i) {
+        if (i % every !== 0) return;
+        var label = el('text', {x: x(i), y: f.height - 8, 'text-anchor': 'middle'}, f.svg);
+        label.textContent = monthLabel(key, i === 0 || key.endsWith('-01'));
+      });
+      el('line', {x1: f.m.left, x2: f.width - f.m.right, y1: f.height - f.m.bottom, y2: f.height - f.m.bottom, stroke: 'var(--viz-axis)'}, f.svg);
+    }
+
+    function yAxis(f, ticks, y, sameUnit) {
+      var exp = tickUnit(ticks[ticks.length - 1]);
+      ticks.forEach(function(v) {
+        el('line', {x1: f.m.left, x2: f.width - f.m.right, y1: y(v), y2: y(v), stroke: 'var(--viz-grid)'}, f.svg);
+        var label = el('text', {x: f.m.left - 8, y: y(v) + 4, 'text-anchor': 'end'}, f.svg);
+        label.textContent = sameUnit ? +(v / Math.pow(1024, exp)).toFixed(2) + ' ' + UNITS[exp] : formatBytes(v, 1);
+      });
+    }
+
+    function path(points) {
+      return points.map(function(p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ',' + p[1].toFixed(1); }).join('');
+    }
+
+    function renderTotal() {
+      var container = card.querySelector('[data-growth-chart="total"]');
+      var f = frame(container, 300);
+      var months = data.months;
+      var start = monthIndex(months[0].month);
+      var linear = data.forecasts.linear;
+      var exponential = data.forecasts.exponential;
+      var lastKey = linear[linear.length - 1].month;
+      var count = monthIndex(lastKey) - start + 1;
+      var keys = [];
+      for (var i = 0; i < count; i++) {
+        var abs = start + i;
+        keys.push(Math.floor(abs / 12) + '-' + String(abs % 12 + 1).padStart(2, '0'));
+      }
+
+      // Scale to the actual data and the best-fit projection; the other projection is clipped at the top.
+      var best = data.best_model === 'exponential' ? exponential : linear;
+      var values = months.map(function(m) { return m.total; }).concat(best.map(function(p) { return p.total; }));
+      var max = Math.max.apply(null, values);
+      var positive = values.filter(function(v) { return v > 0; });
+      var min = Math.min.apply(null, positive);
+
+      var plotW = f.width - f.m.left - f.m.right;
+      var plotH = f.height - f.m.top - f.m.bottom;
+      var x = function(i) { return f.m.left + (count === 1 ? 0 : i / (count - 1) * plotW); };
+      var ticks, y;
+      if (scale === 'log') {
+        var lo = Math.log(min), hi = Math.log(max);
+        y = function(v) { return f.m.top + plotH - (Math.log(Math.max(v, min)) - lo) / (hi - lo || 1) * plotH; };
+        ticks = logTicks(min, max);
+      } else {
+        ticks = linearTicks(max);
+        var top = ticks[ticks.length - 1];
+        y = function(v) { return f.m.top + plotH - v / top * plotH; };
+      }
+
+      yAxis(f, ticks, y, scale !== 'log');
+      xAxis(f, keys, x);
+
+      var fitStart = monthIndex(data.fit_start) - start;
+      if (fitStart > 0) {
+        el('line', {x1: x(fitStart), x2: x(fitStart), y1: f.m.top, y2: f.height - f.m.bottom, stroke: 'var(--viz-grid)'}, f.svg);
+        var fitLabel = el('text', {x: x(fitStart) + 4, y: f.m.top + 10}, f.svg);
+        fitLabel.textContent = 'fit window';
+      }
+
+      var actualPts = months.map(function(m) { return [x(monthIndex(m.month) - start), y(m.total)]; });
+      var area = actualPts.concat([[actualPts[actualPts.length - 1][0], y(scale === 'log' ? min : 0)], [actualPts[0][0], y(scale === 'log' ? min : 0)]]);
+      el('path', {d: path(area) + 'Z', fill: 'var(--viz-actual)', 'fill-opacity': 0.1}, f.svg);
+
+      var clipId = 'growth-clip-' + Math.random().toString(36).slice(2);
+      var clip = el('clipPath', {id: clipId}, el('defs', {}, f.svg));
+      el('rect', {x: f.m.left - 6, y: f.m.top - 6, width: plotW + 12, height: plotH + 12}, clip);
+
+      function forecastLine(points, color) {
+        if (!points.length) return;
+        var group = el('g', {'clip-path': 'url(#' + clipId + ')'}, f.svg);
+        var pts = points.map(function(p) { return [x(monthIndex(p.month) - start), y(p.total)]; });
+        el('path', {d: path(pts), fill: 'none', stroke: color, 'stroke-width': 2, 'stroke-dasharray': '6 4', 'stroke-linecap': 'round'}, group);
+        var end = pts[pts.length - 1];
+        el('circle', {cx: end[0], cy: end[1], r: 4, fill: color, stroke: 'var(--viz-surface)', 'stroke-width': 2}, group);
+      }
+      forecastLine(linear, 'var(--viz-linear)');
+      forecastLine(exponential, 'var(--viz-exponential)');
+
+      el('path', {d: path(actualPts), fill: 'none', stroke: 'var(--viz-actual)', 'stroke-width': 2, 'stroke-linejoin': 'round', 'stroke-linecap': 'round'}, f.svg);
+      var last = actualPts[actualPts.length - 1];
+      el('circle', {cx: last[0], cy: last[1], r: 4, fill: 'var(--viz-actual)', stroke: 'var(--viz-surface)', 'stroke-width': 2}, f.svg);
+
+      // Crosshair snapping to the nearest month.
+      var byKey = {};
+      months.forEach(function(m) { byKey[m.month] = {actual: m}; });
+      linear.forEach(function(p) { (byKey[p.month] = byKey[p.month] || {}).linear = p.total; });
+      exponential.forEach(function(p) { (byKey[p.month] = byKey[p.month] || {}).exponential = p.total; });
+      var cross = el('line', {y1: f.m.top, y2: f.height - f.m.bottom, stroke: 'var(--viz-axis)', visibility: 'hidden'}, f.svg);
+      var hit = el('rect', {x: f.m.left, y: f.m.top, width: plotW, height: plotH, fill: 'transparent'}, f.svg);
+      hit.addEventListener('pointermove', function(event) {
+        var box = f.svg.getBoundingClientRect();
+        var i = Math.round((event.clientX - box.left - f.m.left) / plotW * (count - 1));
+        i = Math.max(0, Math.min(count - 1, i));
+        var entry = byKey[keys[i]] || {};
+        cross.setAttribute('x1', x(i));
+        cross.setAttribute('x2', x(i));
+        cross.setAttribute('visibility', 'visible');
+        var rows = [];
+        if (entry.actual) rows.push({label: entry.actual.partial ? 'Actual (to date)' : 'Actual', value: formatBytes(entry.actual.total), color: 'var(--viz-actual)'});
+        if (entry.linear !== undefined) rows.push({label: 'Linear trend', value: formatBytes(entry.linear), color: 'var(--viz-linear)', dashed: true});
+        if (entry.exponential !== undefined) rows.push({label: 'Exponential trend', value: formatBytes(entry.exponential), color: 'var(--viz-exponential)', dashed: true});
+        tooltipRows(monthLabel(keys[i], true), rows);
+        showTooltip(event);
+      });
+      hit.addEventListener('pointerleave', function() { cross.setAttribute('visibility', 'hidden'); hideTooltip(); });
+    }
+
+    function renderAdded() {
+      var container = card.querySelector('[data-growth-chart="added"]');
+      var f = frame(container, 180);
+      var months = data.months;
+      var plotW = f.width - f.m.left - f.m.right;
+      var plotH = f.height - f.m.top - f.m.bottom;
+      var band = plotW / months.length;
+      var barW = Math.max(2, Math.min(24, band - 2));
+      var ticks = linearTicks(Math.max.apply(null, months.map(function(m) { return m.added; })) || 1);
+      var top = ticks[ticks.length - 1];
+      var y = function(v) { return f.m.top + plotH - v / top * plotH; };
+      var x = function(i) { return f.m.left + band * (i + 0.5); };
+
+      yAxis(f, ticks, y, true);
+      xAxis(f, months.map(function(m) { return m.month; }), x);
+
+      months.forEach(function(m, i) {
+        var h = Math.max(0, f.height - f.m.bottom - y(m.added));
+        var r = Math.min(4, barW / 2, h);
+        var x0 = x(i) - barW / 2, y0 = y(m.added), base = f.height - f.m.bottom;
+        // Rounded data end, square at the baseline.
+        var d = 'M' + x0 + ',' + base + 'V' + (y0 + r) + 'Q' + x0 + ',' + y0 + ' ' + (x0 + r) + ',' + y0 +
+                'H' + (x0 + barW - r) + 'Q' + (x0 + barW) + ',' + y0 + ' ' + (x0 + barW) + ',' + (y0 + r) + 'V' + base + 'Z';
+        var bar = el('path', {d: d, fill: 'var(--viz-actual)', 'fill-opacity': m.partial ? 0.4 : 1}, f.svg);
+        var hit = el('rect', {x: f.m.left + band * i, y: f.m.top, width: band, height: plotH, fill: 'transparent'}, f.svg);
+        hit.addEventListener('pointermove', function(event) {
+          bar.setAttribute('fill-opacity', 0.75);
+          tooltipRows(monthLabel(m.month, true) + (m.partial ? ' (to date)' : ''), [
+            {label: 'Uploaded', value: formatBytes(m.added), color: 'var(--viz-actual)'}
+          ]);
+          showTooltip(event);
+        });
+        hit.addEventListener('pointerleave', function() {
+          bar.setAttribute('fill-opacity', m.partial ? 0.4 : 1);
+          hideTooltip();
+        });
+      });
+    }
+
+    function render() {
+      renderTotal();
+      renderAdded();
+    }
+
+    card.querySelectorAll('.growth-scale-btn').forEach(function(button) {
+      button.addEventListener('click', function() {
+        scale = button.dataset.scale;
+        card.querySelectorAll('.growth-scale-btn').forEach(function(b) {
+          var active = b === button;
+          b.classList.toggle('is-active', active);
+          b.setAttribute('aria-pressed', active);
+        });
+        renderTotal();
+      });
+    });
+
+    var resizeTimer;
+    window.addEventListener('resize', function() {
+      clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(render, 150);
+    });
+
+    render();
+  })();
+</script>

@@ -17,6 +17,9 @@ All notable changes to Active Storage Dashboard will be documented in this file.
 - A "Processing Safety" panel on the dashboard overview, plus a warning banner shown on every
   dashboard page while an unsafe configuration is detected. Undetectable configurations are reported
   as unknown rather than as safe.
+- A "Storage Growth" card on the dashboard overview that shows whether total storage grows linearly
+  or exponentially, with a 12-month projection for both models (`ActiveStorageDashboard::GrowthForecast`),
+  a linear/log scale toggle, monthly uploads and a data table.
 
 ## [0.1.7] - 2025-05-22
 ### Added
